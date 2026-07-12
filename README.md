@@ -4,14 +4,26 @@
 
 # iris
 
-Sensor-intake adapter for the VERICHROME imaging stack: foreign image formats in, sensor truth out — [`RawInfo`] (dimensions, black/white levels, CFA tile, both DNG ColorMatrices with their CalibrationIlluminant codes) plus the sensor counts at native bit depth, exactly as the camera recorded them.
+Any image format in. [VSF-Image](https://github.com/nickspiker/vsf) out.
 
-Bidirectional by intent: today iris reads (DNG and, via `rawler`'s decoders, most camera RAW formats); the DNG/TIFF writers migrate in next, so every foreign format crosses the stack boundary in one place.
+iris is the format gateway of the VERICHROME imaging stack: camera RAW, DNG, TIFF, JPEG, PNG — creative formats or sensor-truth ones, eventually even PSD — cross the stack boundary here, in one place, and come out the other side as VSF-Image: the pixel data stored untouched at native depth, and *what those pixels mean* carried as tiered characterization metadata instead of being baked in.
 
-## What it feeds
+The honesty is in the tier. Every source declares what it actually knows:
 
-- [**opsin**](https://github.com/nickspiker/opsin) — the spectral viewer/converter — translaterates iris's output into [VSF-Image](https://github.com/nickspiker/vsf): sensor counts stored untouched, characterization and view intent as metadata.
-- **chameleon** — the VERICHROME calibration core — reads target scans through the same intake.
+| Source | What iris preserves | Profile grade |
+|---|---|---|
+| Target-scanned camera | magic-9 solve + patches + calibration provenance | `unit` — measured on THIS camera |
+| Camera RAW / DNG | native-depth sensor counts, CFA, black/white, both ColorMatrices + illuminants, verbatim | `model` — factory characterization |
+| JPEG / PNG / TIFF / PSD | decoded code values + the transfer they arrived in | `assumed` — the format convention implies the observer |
+| Anything else | the pixels, honestly unlabeled | none — uncharacterized, never a fake guess |
+
+Downstream, [**opsin**](https://github.com/nickspiker/opsin) translaterates and views, **chameleon** calibrates — neither ever touches a foreign format directly.
+
+## Today / landing
+
+**Wired now:** camera RAW + DNG decode (hand-rolled TIFF/IFD metadata parse; `rawler` strictly as a decompression black box) → dimensions, CFA tile, black/white levels, both DNG ColorMatrices with CalibrationIlluminant codes, and sensor counts at native bit depth. The VSF-Image write currently lives in opsin's convert path.
+
+**Landing:** the VSF-Image write moves in (format in → `.vsf` out becomes one call), assumed-observer ingest (JPEG/PNG/TIFF/PSD), and the DNG/TIFF writers migrate over from chameleon — the aperture passes light both directions.
 
 ## The pipeline, end to end
 
@@ -25,9 +37,10 @@ $ vsfinfo shot.vsf tree        # inspect what was preserved
 
 ## Design rules
 
-- **No colour interpretation.** iris hands over matrices and counts; deciding what they mean is the caller's job. `rawler` is used strictly as a decompression black box — none of its types or colour handling crosses into the pipeline.
-- **Metadata by hand.** A hand-rolled TIFF/IFD parser reads the tags, so exactly which `ColorMatrix1`/`ColorMatrix2`, black, white, and CFA values flow downstream is under explicit control.
-- **Native depth, always.** 14-bit counts stay 14-bit. No promotion, no rescale, no "convenience" normalization.
+- **No colour interpretation.** iris hands over matrices, transfers, and counts; deciding what they mean is characterization's job, downstream. Decoders are decompression black boxes — none of their types or colour handling crosses into the pipeline.
+- **Metadata by hand.** A hand-rolled TIFF/IFD parser reads the tags, so exactly which values flow downstream is under explicit control.
+- **Native depth, always.** 14-bit counts stay 14-bit, 8-bit code values stay 8-bit. No promotion, no rescale, no "convenience" normalization.
+- **Never guess silently.** A source with no implied observer gets no profile — uncharacterized is a first-class, honest state.
 
 ## License
 
