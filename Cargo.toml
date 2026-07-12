@@ -2,7 +2,7 @@
 name = "iris"
 version = "0.0.0"
 edition = "2024"
-description = "Image-format gateway for the VERICHROME imaging stack: any image format in — camera RAW or creative — VSF-Image out, honestly profiled. The aperture the light passes through."
+description = "Image-format gateway for the VERICHROME imaging stack: any image format in, camera RAW or creative, VSF-Image out, honestly profiled. The aperture the light passes through."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nickspiker/iris"
 keywords = ["dng", "raw", "image", "camera", "tiff"]
