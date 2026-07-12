@@ -6,7 +6,7 @@
 
 Any image format in. [VSF-Image](https://github.com/nickspiker/vsf) out.
 
-iris is the format gateway of the VERICHROME imaging stack. Camera RAW, DNG, TIFF, JPEG, PNG, creative formats or sensor-truth ones, eventually even PSD: every foreign format crosses the stack boundary here, in one place, and comes out the other side as VSF-Image. The pixel data is stored untouched at native depth, and what those pixels mean travels as tiered characterization metadata instead of being baked in.
+iris is a format gateway. Camera RAW, DNG, TIFF, JPEG, PNG, creative formats or sensor-truth ones, eventually even PSD: foreign formats enter here and come out the other side as VSF-Image. The pixel data is stored untouched at native depth, and what those pixels mean travels as tiered characterization metadata instead of being baked in.
 
 The honesty is in the tier. Every source declares what it knows:
 
@@ -17,7 +17,7 @@ The honesty is in the tier. Every source declares what it knows:
 | JPEG / PNG / TIFF / PSD | decoded code values + the transfer they arrived in | `assumed`, the format convention implies the observer |
 | Anything else | the pixels, honestly unlabeled | none. Uncharacterized, never a fake guess |
 
-Downstream, [**opsin**](https://github.com/nickspiker/opsin) translaterates and views, **chameleon** calibrates. Neither ever touches a foreign format directly.
+The VERICHROME stack is the first consumer: [**opsin**](https://github.com/nickspiker/opsin) translaterates and views, **chameleon** calibrates, and neither touches a foreign format directly. Anything else that wants VSF-Image enters the same way.
 
 ## Today / landing
 

@@ -1,4 +1,4 @@
-//! iris, the image-format gateway of the VERICHROME stack: any image format in, VSF-Image out. Camera RAW carries sensor truth ([`RawInfo`] + native-depth counts + both DNG matrices); creative formats (JPEG/PNG/TIFF, eventually PSD) enter as `assumed`-grade profiled code values; sources with no implied observer enter honestly uncharacterized. Every foreign format crosses the stack boundary HERE: opsin translaterates and views, chameleon calibrates, neither touches a foreign format directly. Named for the aperture light passes through, bidirectional by intent (the DNG/TIFF writers migrate in from chameleon); today the RAW/DNG read side is wired and the VSF write still lives in opsin's convert path.
+//! iris, a format gateway: any image format in, VSF-Image out. Camera RAW carries sensor truth ([`RawInfo`] + native-depth counts + both DNG matrices); creative formats (JPEG/PNG/TIFF, eventually PSD) enter as `assumed`-grade profiled code values; sources with no implied observer enter honestly uncharacterized. The VERICHROME stack is the first consumer (opsin translaterates and views, chameleon calibrates, neither touches a foreign format directly), but anything that wants VSF-Image enters the same way. Named for the aperture light passes through, bidirectional by intent (the DNG/TIFF writers migrate in from chameleon); today the RAW/DNG read side is wired and the VSF write still lives in opsin's convert path.
 //!
 //! Pixel-buffer policy:
 //!   - Uncompressed strip DNG  → hand-rolled strip read + bit unpack.
@@ -116,7 +116,7 @@ pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     };
     if pixels.len() != rawinfo.width * rawinfo.height {
         eprintln!(
-            "dng_io: pixel count {} != width*height {}*{}",
+            "iris: pixel count {} != width*height {}*{}",
             pixels.len(),
             rawinfo.width,
             rawinfo.height
