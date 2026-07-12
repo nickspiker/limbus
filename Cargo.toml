@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/nickspiker/iris"
 keywords = ["dng", "raw", "image", "camera", "tiff"]
 categories = ["multimedia::images", "encoding"]
-# The hero image renders in the README via its raw.githubusercontent URL — no need to ship the bytes in the crate.
+# The hero image renders in the README via its raw.githubusercontent URL, no need to ship the bytes in the crate.
 exclude = ["iris.webp"]
 
 [dependencies]

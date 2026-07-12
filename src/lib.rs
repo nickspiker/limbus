@@ -8,7 +8,7 @@
 //!
 //! Metadata is always read by the hand-rolled IFD parser so we keep exact control over which
 //! `ColorMatrix1`/`ColorMatrix2` / `CalibrationIlluminant1`/`2` / black / white / CFA values flow
-//! downstream — opsin needs both matrices + illuminant codes to build the tiered colour_profile.
+//! downstream; opsin needs both matrices + illuminant codes to build the tiered colour_profile.
 
 use bitvec::prelude::*;
 use std::fs::File;
@@ -45,7 +45,7 @@ pub struct RawInfo {
     pub colourmatrix1_offset: u32,
     pub colourmatrix2: Option<[f32; 9]>,
     pub colourmatrix2_offset: u32,
-    /// DNG CalibrationIlluminant1/2 — EXIF LightSource code for the illuminant each ColorMatrix was measured under (17 = Standard A, 21 = D65, 23 = D50...). 0 = absent. Lets a consumer pick the matrix matching its assumed scene illuminant instead of guessing.
+    /// DNG CalibrationIlluminant1/2: EXIF LightSource code for the illuminant each ColorMatrix was measured under (17 = Standard A, 21 = D65, 23 = D50...). 0 = absent. Lets a consumer pick the matrix matching its assumed scene illuminant instead of guessing.
     pub calibrationilluminant1: u16,
     pub calibrationilluminant2: u16,
     pub magicoffset: u32,
@@ -499,7 +499,7 @@ fn decode_ifd(
                     rawinfo.colourmatrix2_offset = u32::from_le_bytes(valueoffset);
                 }
             }
-            // CalibrationIlluminant1/2 — SHORT, value inline in the offset field.
+            // CalibrationIlluminant1/2: SHORT, value inline in the offset field.
             50778 => {
                 if fieldtype == 3 && numval == 1 {
                     rawinfo.calibrationilluminant1 = u16::from_le_bytes(valueoffset[0..2].try_into().unwrap());
