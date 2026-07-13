@@ -1,14 +1,14 @@
 [package]
-name = "iris"
+name = "limbus"
 version = "0.0.0"
 edition = "2024"
-description = "Any image format in, VSF-Image out: camera RAW or creative, honestly profiled. The aperture the light passes through."
+description = "Any image format in, VSF-Image out: camera RAW or creative, honestly profiled. The border where light crosses to enter."
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/nickspiker/iris"
+repository = "https://github.com/nickspiker/limbus"
 keywords = ["dng", "raw", "image", "camera", "tiff"]
 categories = ["multimedia::images", "encoding"]
 # The hero image renders in the README via its raw.githubusercontent URL, no need to ship the bytes in the crate.
-exclude = ["iris.webp"]
+exclude = ["limbus.webp"]
 
 [dependencies]
 bitvec = "1.0"
