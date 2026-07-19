@@ -11,5 +11,5 @@ categories = ["multimedia::images", "encoding"]
 exclude = ["limbus.webp"]
 
 [dependencies]
-bitvec = "1.0"
 rawler = "0.7"
+rayon = "1.12.0"
