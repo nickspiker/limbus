@@ -7,8 +7,7 @@
 //!     colour interpretation cross into the rest of the pipeline.
 //!
 //! Metadata is always read by the hand-rolled IFD parser so we keep exact control over which
-//! `ColorMatrix1`/`ColorMatrix2` / `CalibrationIlluminant1`/`2` / black / white / CFA values flow
-//! downstream; opsin needs both matrices + illuminant codes to build the tiered colour_profile.
+//! `ColorMatrix1`/`ColorMatrix2` / `CalibrationIlluminant1`/`2` / black / white / CFA values flow downstream; opsin needs both matrices + illuminant codes to build the tiered colour_profile.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -124,11 +123,8 @@ impl Default for RawInfo {
 
 /// Read a DNG into (metadata, pixel buffer).
 ///
-/// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit
-/// values stored in u16 for 14-bit raws). Length == `width * height`.
-/// For uncompressed strip DNGs this is bit-exact with the previous
-/// hand-rolled reader. For compressed/tiled DNGs the buffer comes from
-/// rawler's lossless decoder.
+/// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit values stored in u16 for 14-bit raws). Length == `width * height`.
+/// For uncompressed strip DNGs this is bit-exact with the previous hand-rolled reader. For compressed/tiled DNGs the buffer comes from rawler's lossless decoder.
 pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     let rawinfo = read_metadata(filename)?;
     let pixels = if !rawinfo.compression && rawinfo.imagedataoffset != 0 {
