@@ -1,6 +1,6 @@
 [package]
 name = "limbus"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 description = "Any image format in, VSF-Image out: camera RAW or creative, honestly profiled. The border where light crosses to enter."
 license = "MIT OR Apache-2.0"
