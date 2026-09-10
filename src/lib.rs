@@ -50,6 +50,9 @@ pub struct RawInfo {
     pub cfa: Vec<u8>,
     pub cfaw: u16,
     pub cfah: u16,
+    /// CFAPattern (33422) offset + count for patterns wider than the 4 inline bytes (e.g. a 4×4 quad-Bayer = 16 entries); resolved after the IFD walk like every other offset field.
+    pub cfaoffset: u32,
+    pub cfacount: u32,
     pub black: f32,
     pub blackoffset: u32,
     pub blackcount: u32,
@@ -95,6 +98,8 @@ impl Default for RawInfo {
             cfa: Vec::new(),
             cfaw: 0,
             cfah: 0,
+            cfaoffset: 0,
+            cfacount: 0,
             black: 0.,
             blackoffset: 0,
             blackcount: 0,
@@ -305,6 +310,16 @@ fn read_metadata(filename: &Path) -> Option<RawInfo> {
         }
     }
 
+    if rawinfo.cfaoffset != 0 {
+        file.seek(SeekFrom::Start(rawinfo.cfaoffset as u64)).ok()?;
+        let mut buffer = vec![0u8; rawinfo.cfacount as usize];
+        let s = file.read(&mut buffer).ok()?;
+        if s != buffer.len() {
+            return None;
+        }
+        rawinfo.cfa = buffer;
+    }
+
     if rawinfo.colourmatrix1_offset != 0 {
         rawinfo.colourmatrix1 = read_rational_matrix9(&mut file, rawinfo.colourmatrix1_offset, be);
     }
@@ -472,8 +487,14 @@ fn decode_ifd(
                 }
             }
             33422 => {
-                if fieldtype == 1 && numval == 4 {
-                    rawinfo.cfa = Vec::from(valueoffset);
+                if fieldtype == 1 {
+                    if numval <= 4 {
+                        rawinfo.cfa = Vec::from(&valueoffset[..numval as usize]);
+                    } else {
+                        // Pattern larger than the 4 inline bytes (quad-Bayer 4×4 = 16): the field holds an offset.
+                        rawinfo.cfacount = numval;
+                        rawinfo.cfaoffset = u32e(&valueoffset, be);
+                    }
                 }
             }
             50714 => {
