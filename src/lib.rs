@@ -168,7 +168,7 @@ fn read_rational_matrix9(file: &mut File, offset: u32, be: bool) -> Option<[f32;
     Some(matrix)
 }
 
-fn read_metadata(filename: &Path) -> Option<RawInfo> {
+pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
     let mut rawinfo = RawInfo::default();
     let mut file = File::open(filename).ok()?;
 
