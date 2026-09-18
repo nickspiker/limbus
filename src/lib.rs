@@ -53,6 +53,11 @@ pub struct RawInfo {
     /// CFAPattern (33422) offset + count for patterns wider than the 4 inline bytes (e.g. a 4×4 quad-Bayer = 16 entries); resolved after the IFD walk like every other offset field.
     pub cfaoffset: u32,
     pub cfacount: u32,
+    /// Samples per pixel (277): 1 for a mosaic, 3 for an RGB TIFF. Sets `rgb` when 3 (as does PhotometricInterpretation = RGB).
+    pub samples: u16,
+    /// BitsPerSample (258) with one entry per sample doesn't fit the inline value field — the offset (+ the field type it was written as), resolved after the walk (first sample's depth; all samples are taken equal).
+    pub bitsoffset: u32,
+    pub bitstype: u16,
     pub black: f32,
     pub blackoffset: u32,
     pub blackcount: u32,
@@ -100,6 +105,9 @@ impl Default for RawInfo {
             cfah: 0,
             cfaoffset: 0,
             cfacount: 0,
+            samples: 1,
+            bitsoffset: 0,
+            bitstype: 3,
             black: 0.,
             blackoffset: 0,
             blackcount: 0,
@@ -128,7 +136,7 @@ impl Default for RawInfo {
 
 /// Read a DNG into (metadata, pixel buffer).
 ///
-/// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit values stored in u16 for 14-bit raws). Length == `width * height`.
+/// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit values stored in u16 for 14-bit raws). Length == `width * height` for a mosaic, `× 3` interleaved for an RGB TIFF (`rgb` set).
 /// For uncompressed strip DNGs this is bit-exact with the previous hand-rolled reader. For compressed/tiled DNGs the buffer comes from rawler's lossless decoder.
 pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     let rawinfo = read_metadata(filename)?;
@@ -137,13 +145,9 @@ pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     } else {
         read_via_rawler(filename, &rawinfo)?
     };
-    if pixels.len() != rawinfo.width * rawinfo.height {
-        eprintln!(
-            "limbus: pixel count {} != width*height {}*{}",
-            pixels.len(),
-            rawinfo.width,
-            rawinfo.height
-        );
+    let expect = rawinfo.width * rawinfo.height * if rawinfo.rgb { 3 } else { 1 };
+    if pixels.len() != expect {
+        eprintln!("limbus: pixel count {} != width*height*samples {}*{}*{}", pixels.len(), rawinfo.width, rawinfo.height, if rawinfo.rgb { 3 } else { 1 });
         return None;
     }
     Some((rawinfo, pixels))
@@ -310,6 +314,16 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
         }
     }
 
+    if rawinfo.bitsoffset != 0 {
+        file.seek(SeekFrom::Start(rawinfo.bitsoffset as u64)).ok()?;
+        let mut b = [0u8; 4];
+        let s = file.read(&mut b).ok()?;
+        if s != 4 {
+            return None;
+        }
+        rawinfo.bitdepthold = match rawinfo.bitstype { 1 => b[0], 3 => u16e(&b, be) as u8, _ => u32e(&b, be) as u8 };
+    }
+
     if rawinfo.cfaoffset != 0 {
         file.seek(SeekFrom::Start(rawinfo.cfaoffset as u64)).ok()?;
         let mut buffer = vec![0u8; rawinfo.cfacount as usize];
@@ -341,7 +355,8 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
 
 fn read_strip_pixels(filename: &Path, info: &RawInfo) -> Option<Vec<u16>> {
     let mut file = File::open(filename).ok()?;
-    let bytes_len = (info.width * info.height * info.bitdepthold as usize - 1) / 8 + 1;
+    let samples = if info.rgb { 3 } else { info.samples.max(1) as usize };
+    let bytes_len = (info.width * info.height * samples * info.bitdepthold as usize - 1) / 8 + 1;
     let mut img = vec![0u8; bytes_len];
     file.seek(SeekFrom::Start(info.imagedataoffset as u64))
         .ok()?;
@@ -385,7 +400,8 @@ fn decode_ifd(
 ) -> (RawInfo, u32, u32, bool, u32) {
     let mut subifdoffset: u32 = 0;
     let mut imgoffset: u32 = 0;
-    let mut mainifd = false;
+    // TIFF 6: an IFD with no NewSubfileType (254) IS the full-resolution image (the tag defaults to 0). DNG thumbnail IFD0s and preview SubIFDs always carry 254 and set it explicitly; plain TIFF writers (lumis's among them) omit it, or write the old SubfileType (255) = 1 = full-resolution.
+    let mut mainifd = true;
     let mut tagid: usize;
     let mut fieldtype: u16;
     let mut numval: u32;
@@ -401,8 +417,13 @@ fn decode_ifd(
 
         match tagid {
             254 => {
-                if fieldtype == 4 && numval == 1 && u32e(&valueoffset, be) == 0 {
-                    mainifd = true;
+                if fieldtype == 4 && numval == 1 {
+                    mainifd = u32e(&valueoffset, be) == 0;
+                }
+            }
+            255 => {
+                if fieldtype == 3 && numval == 1 {
+                    mainifd = u16e(&valueoffset, be) == 1;
                 }
             }
             256 => {
@@ -424,8 +445,15 @@ fn decode_ifd(
                 }
             }
             258 => {
-                if fieldtype == 3 && numval == 1 && (rawinfo.bitdepth == 0 || mainifd) {
-                    rawinfo.bitdepthold = u16e(&valueoffset, be) as u8;
+                // BitsPerSample: SHORT per the spec, but seen as BYTE from an early lumis TIFF writer (`10 10 10`) — tolerate BYTE/SHORT/LONG. One entry per sample, all taken equal (the first is used); inline when they fit the 4-byte field, else at the offset.
+                if mainifd {
+                    let size = match fieldtype { 1 => 1, 3 => 2, 4 => 4, _ => 0 };
+                    if size > 0 && numval as usize * size <= 4 {
+                        rawinfo.bitdepthold = match fieldtype { 1 => valueoffset[0] as u8, 3 => u16e(&valueoffset, be) as u8, _ => u32e(&valueoffset, be) as u8 };
+                    } else if size > 0 {
+                        rawinfo.bitsoffset = u32e(&valueoffset, be);
+                        rawinfo.bitstype = fieldtype;
+                    }
                 }
             }
             259 => {
@@ -434,7 +462,10 @@ fn decode_ifd(
                 }
             }
             262 => {
-                if fieldtype == 3 && numval == 1 && u16e(&valueoffset, be) == 32803 {}
+                // PhotometricInterpretation: 2 = RGB (demosaiced), 32803 = CFA (mosaic).
+                if fieldtype == 3 && numval == 1 && mainifd && u16e(&valueoffset, be) == 2 {
+                    rawinfo.rgb = true;
+                }
             }
             271 => {
                 if fieldtype == 2 && rawinfo.makeoffset == 0 {
@@ -464,12 +495,18 @@ fn decode_ifd(
                 }
             }
             274 => {
-                if fieldtype == 3 && numval == 1 {
+                // IFD0's Orientation is the file's (DNG spec); a preview SubIFD carries its own (typically 1, "normal", for a pre-rotated thumbnail) and is walked AFTER IFD0 — so first-seen wins, or a rotated capture renders landscape (lumis 2026-08-11 21:16, orientation 6 lost to the SubIFD's 1). 9 = the absent sentinel.
+                if fieldtype == 3 && numval == 1 && rawinfo.orientation == 9 {
                     rawinfo.orientation = u16e(&valueoffset, be);
                 }
             }
             277 => {
-                if fieldtype == 3 && numval == 1 && u16e(&valueoffset, be) == 1 {}
+                if fieldtype == 3 && numval == 1 && mainifd {
+                    rawinfo.samples = u16e(&valueoffset, be);
+                    if rawinfo.samples == 3 {
+                        rawinfo.rgb = true;
+                    }
+                }
             }
             284 => {
                 if fieldtype == 3 && numval == 1 && u16e(&valueoffset, be) == 1 {}
