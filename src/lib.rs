@@ -157,8 +157,7 @@ impl Default for RawInfo {
 
 /// Read a DNG into (metadata, pixel buffer).
 ///
-/// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit values stored in u16 for 14-bit raws). Length == `width * height` for a mosaic, `× 3` interleaved for an RGB TIFF (`rgb` set).
-/// For uncompressed strip DNGs this is bit-exact with the previous hand-rolled reader. For compressed/tiled DNGs the buffer comes from rawler's lossless decoder.
+/// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit values stored in u16 for 14-bit raws). Length == `width * height` for a mosaic, `× 3` interleaved for an RGB TIFF (`rgb` set). For uncompressed strip DNGs this is bit-exact with the previous hand-rolled reader. For compressed/tiled DNGs the buffer comes from rawler's lossless decoder.
 pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     if is_vsf(filename) {
         return read_visual(filename);
@@ -267,8 +266,7 @@ fn read_visual(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     Some((info, pixels))
 }
 
-/// Walk IFDs, fill RawInfo. Does not read the pixel buffer.
-/// Read a 9-entry SRATIONAL matrix (numerator/denominator i32 pairs) at `offset`. Shared by ColorMatrix1/2.
+/// Walk IFDs, fill RawInfo. Does not read the pixel buffer. Read a 9-entry SRATIONAL matrix (numerator/denominator i32 pairs) at `offset`. Shared by ColorMatrix1/2.
 fn read_rational_matrix9(file: &mut File, offset: u32, be: bool) -> Option<[f32; 9]> {
     file.seek(SeekFrom::Start(offset as u64)).ok()?;
     let mut buffer = vec![0u8; 9 * 8];
