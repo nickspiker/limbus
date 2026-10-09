@@ -12,4 +12,5 @@ exclude = ["limbus.webp"]
 
 [dependencies]
 rawler = "0.7"
+vsf = { version = "0.9.3", path = "../vsf" }
 rayon = "1.12.0"

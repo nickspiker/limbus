@@ -73,6 +73,16 @@ pub struct RawInfo {
     pub colourmatrix1_offset: u32,
     pub colourmatrix2: Option<[f32; 9]>,
     pub colourmatrix2_offset: u32,
+    /// DNG CameraCalibration1/2 (50723/50724): the per-unit correction a reader multiplies ONTO the ColorMatrix — `XYZ→camera = CameraCalibration × ColorMatrix`. `None` when absent (identity). A VERICHROME paste puts the measured IDT here so every DNG reader renders thru it and the factory matrix survives.
+    pub cameracalibration1: Option<[f32; 9]>,
+    pub cameracalibration1_offset: u32,
+    pub cameracalibration2: Option<[f32; 9]>,
+    pub cameracalibration2_offset: u32,
+    /// DNG CameraCalibrationSignature (50931), the pairing string a reader matches against the profile's before applying the calibration; empty when absent. A VERICHROME paste's begins "VERICHROME".
+    pub calibration_signature: String,
+    sigoffset: u32,
+    sigcount: u32,
+    siginline: [u8; 4],
     /// DNG CalibrationIlluminant1/2: EXIF LightSource code for the illuminant each ColorMatrix was measured under (17 = Standard A, 21 = D65, 23 = D50...). 0 = absent. Lets a consumer pick the matrix matching its assumed scene illuminant instead of guessing.
     pub calibrationilluminant1: u16,
     pub calibrationilluminant2: u16,
@@ -83,6 +93,10 @@ pub struct RawInfo {
     pub ifdoffset: u32,
     pub duck: bool,
     pub save_scan: bool,
+    /// DNGVersion (50706) present: the file speaks DNG, so the tags this walker reads ARE its geometry, CFA and levels. Any other TIFF-family raw (CR2, ARW, NEF…) only borrows the container — its real values come from rawler (see [`read_dng`]).
+    pub dng: bool,
+    /// The maker's recommended crop, `[x, y, w, h]` in pixel-buffer coordinates — DNG `DefaultCropOrigin`/`DefaultCropSize` offset by `ActiveArea`, or a camera's own published crop, as rawler resolves them. The buffer itself is NEVER cropped: the full recorded area (masked borders included) is what's read, and this is the suggestion a viewer can offer. `None` when the file states none.
+    pub crop: Option<[u32; 4]>,
 }
 
 impl Default for RawInfo {
@@ -121,6 +135,14 @@ impl Default for RawInfo {
             colourmatrix1_offset: 0,
             colourmatrix2: None,
             colourmatrix2_offset: 0,
+            cameracalibration1: None,
+            cameracalibration1_offset: 0,
+            cameracalibration2: None,
+            cameracalibration2_offset: 0,
+            calibration_signature: String::new(),
+            sigoffset: 0,
+            sigcount: 0,
+            siginline: [0; 4],
             calibrationilluminant1: 0,
             calibrationilluminant2: 0,
             magicoffset: 0,
@@ -130,6 +152,8 @@ impl Default for RawInfo {
             ifdoffset: 0,
             duck: false,
             save_scan: false,
+            dng: false,
+            crop: None,
         }
     }
 }
@@ -139,11 +163,16 @@ impl Default for RawInfo {
 /// Pixel buffer is u16 in the file's native bit depth (e.g. 14-bit values stored in u16 for 14-bit raws). Length == `width * height` for a mosaic, `× 3` interleaved for an RGB TIFF (`rgb` set).
 /// For uncompressed strip DNGs this is bit-exact with the previous hand-rolled reader. For compressed/tiled DNGs the buffer comes from rawler's lossless decoder.
 pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
-    let rawinfo = read_metadata(filename)?;
+    if is_vsf(filename) {
+        return read_visual(filename);
+    }
+    let mut rawinfo = read_metadata(filename)?;
     let pixels = if !rawinfo.compression && rawinfo.imagedataoffset != 0 {
-        read_strip_pixels(filename, &rawinfo)?
+        let px = read_strip_pixels(filename, &rawinfo)?;
+        rawinfo.crop = rawler_crop(filename);
+        px
     } else {
-        read_via_rawler(filename, &rawinfo)?
+        read_via_rawler(filename, &mut rawinfo)?
     };
     let expect = rawinfo.width * rawinfo.height * if rawinfo.rgb { 3 } else { 1 };
     if pixels.len() != expect {
@@ -151,6 +180,94 @@ pub fn read_dng(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
         return None;
     }
     Some((rawinfo, pixels))
+}
+
+/// Does the file start with VSF's magic (`RÅ<`)?
+fn is_vsf(filename: &Path) -> bool {
+    let mut f = match File::open(filename) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).is_ok() && &magic[..3] == "RÅ".as_bytes() && magic[3] == b'<'
+}
+
+/// A VSF visual as a raw: its primary plane's samples (mosaic as the sensor grid; a planar RGB plane interleaved) with the geometry, CFA, levels, matrix and orientation the visual states — so every consumer of `read_dng` (chameleon's target scan among them) reads the house container with no change. The visual's own characterization is authoritative (`dng = true`); the maker's crop rides as the suggestion.
+fn read_visual(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
+    let v = match vsf::visual::Visual::read_file(filename) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("limbus: {}: {e}", filename.display());
+            return None;
+        }
+    };
+    let p = v.primary_plane()?;
+    let t = match &p.samples {
+        vsf::visual::Samples::Packed(t) => t,
+        vsf::visual::Samples::Wrapped(code, _) => {
+            eprintln!("limbus: {}: plane is wrapped under codec '{}' — only bit-packed planes read as raws", filename.display(), *code as char);
+            return None;
+        }
+    };
+    if t.bit_depth > 16 {
+        eprintln!("limbus: {}: {}-bit plane does not fit the u16 raw buffer", filename.display(), t.bit_depth);
+        return None;
+    }
+    let samples = t.unpack_u16();
+    let mut info = RawInfo::default();
+    info.width = p.width;
+    info.height = p.height;
+    info.bitdepth = t.bit_depth;
+    info.bitdepthold = t.bit_depth;
+    info.black = p.black.first().copied().unwrap_or(0.);
+    info.white = p.white.first().copied().unwrap_or(((1u32 << t.bit_depth) - 1) as f32);
+    info.orientation = if (1..=8).contains(&p.orientation) { p.orientation } else { 9 };
+    info.dng = true;
+    info.crop = p.maker_crop;
+    if let Some(c) = &v.capture {
+        info.make = c.make.clone();
+        info.model = c.model.clone();
+    }
+    if let Some(ch) = &v.characterization {
+        if let Some((m, ill)) = ch.dng_colormatrix[0] {
+            info.colourmatrix1 = Some(m);
+            info.calibrationilluminant1 = ill;
+        }
+        if let Some((m, ill)) = ch.dng_colormatrix[1] {
+            info.colourmatrix2 = Some(m);
+            info.calibrationilluminant2 = ill;
+        }
+    }
+    let pixels = match &p.layout {
+        vsf::spectral_image::PlaneLayout::Mosaic { cfa } => {
+            info.cfah = cfa.shape[0] as u16;
+            info.cfaw = cfa.shape[1] as u16;
+            info.cfa = cfa.data.clone();
+            if samples.len() != p.width * p.height {
+                eprintln!("limbus: {}: mosaic plane holds {} samples for {}×{}", filename.display(), samples.len(), p.width, p.height);
+                return None;
+            }
+            samples
+        }
+        vsf::spectral_image::PlaneLayout::Planar => {
+            let k = p.channels.len();
+            if k != 3 || samples.len() != 3 * p.width * p.height {
+                eprintln!("limbus: {}: a planar raw needs exactly 3 channels of {}×{}, this plane has {k} channels and {} samples", filename.display(), p.width, p.height, samples.len());
+                return None;
+            }
+            info.rgb = true;
+            info.samples = 3;
+            let n = p.width * p.height;
+            let mut inter = vec![0u16; n * 3];
+            for i in 0..n {
+                inter[i * 3] = samples[i];
+                inter[i * 3 + 1] = samples[n + i];
+                inter[i * 3 + 2] = samples[2 * n + i];
+            }
+            inter
+        }
+    };
+    Some((info, pixels))
 }
 
 /// Walk IFDs, fill RawInfo. Does not read the pixel buffer.
@@ -340,6 +457,21 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
     if rawinfo.colourmatrix2_offset != 0 {
         rawinfo.colourmatrix2 = read_rational_matrix9(&mut file, rawinfo.colourmatrix2_offset, be);
     }
+    if rawinfo.cameracalibration1_offset != 0 {
+        rawinfo.cameracalibration1 = read_rational_matrix9(&mut file, rawinfo.cameracalibration1_offset, be);
+    }
+    if rawinfo.cameracalibration2_offset != 0 {
+        rawinfo.cameracalibration2 = read_rational_matrix9(&mut file, rawinfo.cameracalibration2_offset, be);
+    }
+    if rawinfo.sigcount > 0 {
+        let bytes = if rawinfo.sigcount <= 4 {
+            rawinfo.siginline[..rawinfo.sigcount as usize].to_vec()
+        } else {
+            let mut b = vec![0u8; rawinfo.sigcount as usize];
+            if file.seek(SeekFrom::Start(rawinfo.sigoffset as u64)).is_ok() && file.read_exact(&mut b).is_ok() { b } else { Vec::new() }
+        };
+        rawinfo.calibration_signature = String::from_utf8_lossy(&bytes).trim_end_matches('\0').trim().to_string();
+    }
 
     rawinfo.white = rawinfo
         .white
@@ -367,7 +499,47 @@ fn read_strip_pixels(filename: &Path, info: &RawInfo) -> Option<Vec<u16>> {
     Some(convert_raw_to_u16(&img, info.bitdepthold, info.bigendian))
 }
 
-fn read_via_rawler(filename: &Path, info: &RawInfo) -> Option<Vec<u16>> {
+/// Per-model characterizations for cameras rawler's database doesn't carry — DNG-native bodies, whose in-file `ColorMatrix` is the maker's own and can't be trusted to be a measurement. `(make, model, [(EXIF LightSource code, XYZ→camera row-major)])`.
+///
+/// **SIGMA fp** — the body writes a DIFFERENT matrix pair per colour mode (same firmware 4.00): mode OFF ("flat") renders a measured target at ~0.57× its true chroma, Standard/Neutral at ~0.80×, 8.2 / 5.0 mean ΔE2000 against a best possible 3×3 of 2.5 (five VERICHROME-target frames, 2026-10-08). This D65 matrix — RawTherapee's `camconst.json` "Sigma fp", tagged `// DNG`, i.e. Adobe-derived — scored 4.0 ΔE2000 at 0.92× chroma on the same frames: the same honest-measurement profile as Adobe's Sony matrices (0.5–1 ΔE above the floor, 0.89–1.0× chroma).
+const MODEL_MATRICES: &[(&str, &str, &[(u16, [f32; 9])])] = &[(
+    "SIGMA",
+    "SIGMA fp",
+    &[(21, [1.2431, -0.5541, -0.1000, -0.4387, 1.2361, 0.2265, -0.0732, 0.1526, 0.5970])],
+)];
+
+/// The per-model characterization for a camera — its `ColorMatrix` (XYZ → camera) for each illuminant it was measured under, as `(EXIF LightSource code, row-major 3×3)`: limbus's own table first ([`MODEL_MATRICES`], for DNG-native bodies), else rawler's camera database (Adobe's measurements, as dcraw and LibRaw carry them). Empty when nobody has characterized the model. Proprietary raws (CR2, ARW, NEF…) carry no matrix at all, and a DNG-native body's own can be a look rather than a measurement — this is the measured one, by model, never by file.
+pub fn model_matrices(make: &str, model: &str) -> Vec<(u16, [f32; 9])> {
+    let (make, model) = (make.trim_end_matches('\0').trim(), model.trim_end_matches('\0').trim());
+    if let Some((_, _, m)) = MODEL_MATRICES.iter().find(|(mk, md, _)| mk.eq_ignore_ascii_case(make) && md.eq_ignore_ascii_case(model)) {
+        return m.to_vec();
+    }
+    let Some(cam) = rawler::global_loader().get_cameras().values().find(|c| c.make.eq_ignore_ascii_case(make) && c.model.eq_ignore_ascii_case(model)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(u16, [f32; 9])> = cam
+        .color_matrix
+        .iter()
+        .filter_map(|(ill, m)| m.get(..9).and_then(|m| <[f32; 9]>::try_from(m).ok()).map(|m| (ill.clone() as u16, m)))
+        .collect();
+    out.sort_by_key(|&(ill, _)| ill);
+    out
+}
+
+/// The maker's crop from rawler WITHOUT decoding pixels (its decoders' `dummy` mode) — for the strip-read path, which never calls rawler otherwise. `[x, y, w, h]`; `None` when rawler doesn't know the file or it states no crop.
+fn rawler_crop(filename: &Path) -> Option<[u32; 4]> {
+    let src = rawler::rawsource::RawSource::new(filename).ok()?;
+    let dec = rawler::get_decoder(&src).ok()?;
+    let raw = dec.raw_image(&src, &rawler::decoders::RawDecodeParams::default(), true).ok()?;
+    rect4(raw.crop_area)
+}
+
+fn rect4(r: Option<rawler::imgop::Rect>) -> Option<[u32; 4]> {
+    r.filter(|r| r.d.w > 0 && r.d.h > 0).map(|r| [r.p.x as u32, r.p.y as u32, r.d.w as u32, r.d.h as u32])
+}
+
+/// Decode through rawler. A DNG's own tags stay authoritative (rawler must agree with them on size). Any OTHER raw only borrows the TIFF container — a CR2's IFD0 is its JPEG preview (8-bit, no CFA), an ARW's BitsPerSample says 12 where the data is 14 — so for those rawler's geometry, CFA and levels REPLACE the walker's: the full recorded area, masked borders included, with the maker's crop alongside as a suggestion.
+fn read_via_rawler(filename: &Path, info: &mut RawInfo) -> Option<Vec<u16>> {
     let raw = match rawler::decode_file(filename) {
         Ok(r) => r,
         Err(e) => {
@@ -382,6 +554,29 @@ fn read_via_rawler(filename: &Path, info: &RawInfo) -> Option<Vec<u16>> {
             return None;
         }
     };
+    info.crop = rect4(raw.crop_area);
+    if !info.dng {
+        info.width = raw.width;
+        info.height = raw.height;
+        info.rgb = raw.cpp == 3;
+        info.samples = raw.cpp as u16;
+        if raw.cpp == 1 {
+            let cfa = &raw.camera.cfa;
+            let (w, h) = (cfa.width.max(1), cfa.height.max(1));
+            info.cfaw = w as u16;
+            info.cfah = h as u16;
+            info.cfa = (0..h).flat_map(|y| (0..w).map(move |x| (y, x))).map(|(y, x)| cfa.color_at(y, x) as u8).collect();
+        }
+        // One level per channel position in rawler; limbus carries one scalar — they agree on every camera rawler knows, and the mean is the honest single number when they don't.
+        let levels: Vec<f32> = raw.blacklevel.levels.iter().filter(|r| r.d != 0).map(|r| r.n as f32 / r.d as f32).collect();
+        if !levels.is_empty() {
+            info.black = levels.iter().sum::<f32>() / levels.len() as f32;
+        }
+        if let Some(&w) = raw.whitelevel.0.iter().max() {
+            info.white = w as f32;
+            info.bitdepth = (32 - w.leading_zeros()).clamp(1, 16) as u8;
+        }
+    }
     if raw.width != info.width || raw.height != info.height {
         eprintln!(
             "rawler dimensions {}×{} disagree with parsed metadata {}×{}",
@@ -534,6 +729,7 @@ fn decode_ifd(
                     }
                 }
             }
+            50706 => rawinfo.dng = true,
             50714 => {
                 if numval == 1 {
                     if fieldtype == 3 {
@@ -564,6 +760,24 @@ fn decode_ifd(
             50722 => {
                 if (fieldtype == 5 || fieldtype == 10) && numval == 9 {
                     rawinfo.colourmatrix2_offset = u32e(&valueoffset, be);
+                }
+            }
+            50723 => {
+                if (fieldtype == 5 || fieldtype == 10) && numval == 9 {
+                    rawinfo.cameracalibration1_offset = u32e(&valueoffset, be);
+                }
+            }
+            50724 => {
+                if (fieldtype == 5 || fieldtype == 10) && numval == 9 {
+                    rawinfo.cameracalibration2_offset = u32e(&valueoffset, be);
+                }
+            }
+            // CameraCalibrationSignature: ASCII or BYTE (UTF-8); inline when it fits the value field.
+            50931 => {
+                if fieldtype == 1 || fieldtype == 2 {
+                    rawinfo.sigcount = numval;
+                    rawinfo.sigoffset = u32e(&valueoffset, be);
+                    rawinfo.siginline = valueoffset;
                 }
             }
             // CalibrationIlluminant1/2: SHORT, value inline in the offset field.
@@ -663,7 +877,7 @@ mod tests {
 
     /// Minimal single-IFD uncompressed 2×2 16-bit file in either byte order: same logical content, twin layouts.
     fn synth_tiff(be: bool) -> Vec<u8> {
-        const NTAGS: u16 = 8;
+        const NTAGS: u16 = 9;
         let pixel_offset: u32 = 8 + 2 + NTAGS as u32 * 12 + 4;
         let mut f = Vec::new();
         f.extend_from_slice(if be { &[77, 77, 0, 42] } else { &[73, 73, 42, 0] });
@@ -676,6 +890,7 @@ mod tests {
         entry(&mut f, 259, 3, 1, short4(1, be), be); // uncompressed
         entry(&mut f, 273, 4, 1, p32(pixel_offset, be), be); // strip offset
         entry(&mut f, 274, 3, 1, short4(6, be), be); // orientation: rotate 90 CW
+        entry(&mut f, 50706, 1, 4, [1, 4, 0, 0], be); // DNGVersion 1.4
         entry(&mut f, 50717, 3, 1, short4(60000, be), be); // white level
         f.extend_from_slice(&p32(0, be)); // no next IFD
         for v in [100u16, 200, 300, 400] {
@@ -703,13 +918,29 @@ mod tests {
             assert_eq!(info.orientation, 6);
             assert_eq!(info.white, 60000.);
             assert!(!info.compression);
+            assert!(info.dng, "DNGVersion marks the file as DNG: its own tags are authoritative");
+            // No crop tags, and rawler doesn't know this toy file: the crop lookup comes back empty and the read still succeeds.
+            assert_eq!(info.crop, None);
             assert_eq!(px.as_slice(), &[100, 200, 300, 400]);
         }
+    }
+
+    /// Adobe's per-model matrices: from rawler's database for a proprietary raw (no matrix in the file), from limbus's own table for a DNG-native body rawler doesn't carry, nothing for an unknown camera.
+    #[test]
+    fn model_matrices_by_make_and_model() {
+        let canon = model_matrices("Canon", "Canon EOS 6D");
+        assert_eq!(canon.iter().map(|m| m.0).collect::<Vec<_>>(), vec![17, 21], "A and D65");
+        assert_eq!(canon[1].1, [0.7034, -0.0804, -0.1014, -0.442, 1.2564, 0.2058, -0.0851, 0.1994, 0.5758]);
+        assert!(!model_matrices("SONY", "ILCE-7RM3").is_empty());
+        assert_eq!(model_matrices("SIGMA", "SIGMA fp")[0].0, 21);
+        assert_eq!(model_matrices("sigma\0", "sigma FP")[0].1[0], 1.2431, "trimmed, case-blind");
+        assert!(model_matrices("Nobody", "Made This").is_empty());
     }
 
     #[test]
     fn orientation_defaults_to_absent_sentinel() {
         assert_eq!(RawInfo::default().orientation, 9);
+        assert!(!RawInfo::default().dng);
     }
 
     #[test]
