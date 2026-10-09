@@ -2,12 +2,9 @@
 //!
 //! Pixel-buffer policy:
 //!   - Uncompressed strip DNG  → hand-rolled strip read + bit unpack.
-//!   - Compressed and/or tiled → delegate the pixel buffer to `rawler`,
-//!     used purely as a decompression black box. No rawler types or
-//!     colour interpretation cross into the rest of the pipeline.
+//!   - Compressed and/or tiled → delegate the pixel buffer to `rawler`, used purely as a decompression black box. No rawler types or colour interpretation cross into the rest of the pipeline.
 //!
-//! Metadata is always read by the hand-rolled IFD parser so we keep exact control over which
-//! `ColorMatrix1`/`ColorMatrix2` / `CalibrationIlluminant1`/`2` / black / white / CFA values flow downstream; opsin needs both matrices + illuminant codes to build the tiered colour_profile.
+//! Metadata is always read by the hand-rolled IFD parser so we keep exact control over which `ColorMatrix1`/`ColorMatrix2` / `CalibrationIlluminant1`/`2` / black / white / CFA values flow downstream; opsin needs both matrices + illuminant codes to build the tiered colour_profile.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
