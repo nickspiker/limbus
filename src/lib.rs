@@ -198,13 +198,15 @@ fn read_visual(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
         }
     };
     let p = v.primary_plane()?;
-    let t = match &p.samples {
-        vsf::visual::Samples::Packed(t) => t,
-        vsf::visual::Samples::Wrapped(code, _) => {
-            eprintln!("limbus: {}: plane is wrapped under codec '{}' — only bit-packed planes read as raws", filename.display(), *code as char);
+    // Linear counts: an encoded (gamma 2 or g2t) plane is linearized by vsf, with white placed so its highlights still fit.
+    let (t, black, white) = match p.linear_samples() {
+        Ok(lin) => lin,
+        Err(e) => {
+            eprintln!("limbus: {}: {e} — only bit-packed planes read as raws", filename.display());
             return None;
         }
     };
+    let t = &t;
     if t.bit_depth > 16 {
         eprintln!("limbus: {}: {}-bit plane does not fit the u16 raw buffer", filename.display(), t.bit_depth);
         return None;
@@ -215,8 +217,8 @@ fn read_visual(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     info.height = p.height;
     info.bitdepth = t.bit_depth;
     info.bitdepthold = t.bit_depth;
-    info.black = p.black.first().copied().unwrap_or(0.);
-    info.white = p.white.first().copied().unwrap_or(((1u32 << t.bit_depth) - 1) as f32);
+    info.black = black.first().copied().unwrap_or(0.);
+    info.white = white.first().copied().unwrap_or(((1u32 << t.bit_depth) - 1) as f32);
     info.orientation = if (1..=8).contains(&p.orientation) { p.orientation } else { 9 };
     info.dng = true;
     info.crop = p.maker_crop;
