@@ -268,14 +268,24 @@ fn read_visual(filename: &Path) -> Option<(RawInfo, Vec<u16>)> {
     Some((info, pixels))
 }
 
-/// Walk IFDs, fill RawInfo. Does not read the pixel buffer. Read a 9-entry SRATIONAL matrix (numerator/denominator i32 pairs) at `offset`. Shared by ColorMatrix1/2.
-fn read_rational_matrix9(file: &mut File, offset: u32, be: bool) -> Option<[f32; 9]> {
-    file.seek(SeekFrom::Start(offset as u64)).ok()?;
-    let mut buffer = vec![0u8; 9 * 8];
-    let s = file.read(&mut buffer).ok()?;
-    if s != buffer.len() {
+/// The largest frame this reader decodes, in pixels (width × height): 2^29 holds every camera shipped (a 400-megapixel pixel-shift frame is 2^28.6) in a 1 GiB u16 mosaic buffer, and a header naming more would otherwise reserve a buffer no file fills before a byte of it is checked (security audit LIB-12).
+const PIXEL_BUDGET: usize = 1 << 29;
+
+/// A `len`-byte read at `offset`, allocated only once the file is known to hold it. Every count and offset in this reader is a file field, and this is the one place they meet the file's real length (security audit LIB-12).
+fn read_at(file: &mut File, file_len: u64, offset: u64, len: u64) -> Option<Vec<u8>> {
+    // WHY/PROOF: a count from the file can name gigabytes the file does not hold, and `vec![0u8; len]` would reserve them before the read could fail.
+    if offset + len > file_len {
         return None;
     }
+    let mut buf = vec![0u8; len as usize];
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Walk IFDs, fill RawInfo. Does not read the pixel buffer. Read a 9-entry SRATIONAL matrix (numerator/denominator i32 pairs) at `offset`. Shared by ColorMatrix1/2.
+fn read_rational_matrix9(file: &mut File, file_len: u64, offset: u32, be: bool) -> Option<[f32; 9]> {
+    let buffer = read_at(file, file_len, offset as u64, 9 * 8)?;
     let mut matrix = [0f32; 9];
     for i in 0..9 {
         let off = i * 8;
@@ -289,35 +299,20 @@ fn read_rational_matrix9(file: &mut File, offset: u32, be: bool) -> Option<[f32;
 pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
     let mut rawinfo = RawInfo::default();
     let mut file = File::open(filename).ok()?;
+    let file_len = file.metadata().ok()?.len();
 
-    let mut buffer = [0u8; 8];
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let s = file.read(&mut buffer).ok()?;
-    if s != buffer.len() {
-        return None;
-    }
+    let buffer = read_at(&mut file, file_len, 0, 8)?;
     let be = match &buffer[0..4] {
         [73, 73, 42, 0] => false, // "II" + 42 little-endian
         [77, 77, 0, 42] => true,  // "MM" + 42 big-endian
         _ => return None,
     };
     rawinfo.bigendian = be;
-    let mut offset = u32e(&buffer[4..], be);
+    // Offsets are 32-bit file fields advanced in u64, so the +2 past an IFD count can never wrap.
+    let offset = u32e(&buffer[4..], be) as u64;
 
-    let mut buf = vec![0u8; 2];
-    file.seek(SeekFrom::Start(offset as u64)).ok()?;
-    let s = file.read(&mut buf).ok()?;
-    if s != buf.len() {
-        return None;
-    }
-    offset += 2;
-    let mut numifd = u16e(&buf, be);
-    let mut entries = vec![0u8; numifd as usize * 12];
-    file.seek(SeekFrom::Start(offset as u64)).ok()?;
-    let s = file.read(&mut entries).ok()?;
-    if s != entries.len() {
-        return None;
-    }
+    let numifd = u16e(&read_at(&mut file, file_len, offset, 2)?, be);
+    let entries = read_at(&mut file, file_len, offset + 2, numifd as u64 * 12)?;
 
     let mut subifdoffset: u32;
     let mut imgoffset: u32;
@@ -327,45 +322,16 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
     rawinfo.imagedataoffset = imgoffset;
 
     if trees == 1 {
-        let mut buf = vec![0u8; 2];
-        file.seek(SeekFrom::Start(subifdoffset as u64)).ok()?;
-        let s = file.read(&mut buf).ok()?;
-        if s != buf.len() {
-            return None;
-        }
-        offset = subifdoffset + 2;
-        let numifd = u16e(&buf, be);
-        let mut entries = vec![0u8; numifd as usize * 12];
-        file.seek(SeekFrom::Start(offset as u64)).ok()?;
-        let s = file.read(&mut entries).ok()?;
-        if s != entries.len() {
-            return None;
-        }
+        let offset = subifdoffset as u64;
+        let numifd = u16e(&read_at(&mut file, file_len, offset, 2)?, be);
+        let entries = read_at(&mut file, file_len, offset + 2, numifd as u64 * 12)?;
         (rawinfo, _, _, _, _) = decode_ifd(numifd, entries, rawinfo, be);
     } else {
-        offset = subifdoffset;
-        let mut treelist = vec![0u8; trees as usize * 4];
-        file.seek(SeekFrom::Start(offset as u64)).ok()?;
-        let s = file.read(&mut treelist).ok()?;
-        if s != treelist.len() {
-            return None;
-        }
+        let treelist = read_at(&mut file, file_len, subifdoffset as u64, trees as u64 * 4)?;
         for treecount in 0..trees {
-            let mut buf = vec![0u8; 2];
-            offset = u32e(&treelist[treecount as usize * 4..treecount as usize * 4 + 4], be);
-            file.seek(SeekFrom::Start(offset as u64)).ok()?;
-            let s = file.read(&mut buf).ok()?;
-            if s != buf.len() {
-                return None;
-            }
-            numifd = u16e(&buf, be);
-            offset += 2;
-            let mut entries = vec![0u8; numifd as usize * 12];
-            file.seek(SeekFrom::Start(offset as u64)).ok()?;
-            let s = file.read(&mut entries).ok()?;
-            if s != entries.len() {
-                return None;
-            }
+            let offset = u32e(&treelist[treecount as usize * 4..treecount as usize * 4 + 4], be) as u64;
+            let numifd = u16e(&read_at(&mut file, file_len, offset, 2)?, be);
+            let entries = read_at(&mut file, file_len, offset + 2, numifd as u64 * 12)?;
             #[allow(unused_assignments)]
             {
                 (rawinfo, subifdoffset, imgoffset, mainifd, trees) =
@@ -378,21 +344,11 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
     }
 
     if rawinfo.makeoffset != 0 {
-        file.seek(SeekFrom::Start(rawinfo.makeoffset as u64)).ok()?;
-        let mut buffer = vec![0u8; rawinfo.makelen as usize];
-        let s = file.read(&mut buffer).ok()?;
-        if s != buffer.len() {
-            return None;
-        }
+        let buffer = read_at(&mut file, file_len, rawinfo.makeoffset as u64, rawinfo.makelen as u64)?;
         rawinfo.make = str::from_utf8(&buffer).ok()?.to_owned();
     }
     if rawinfo.modeloffset != 0 {
-        file.seek(SeekFrom::Start(rawinfo.modeloffset as u64)).ok()?;
-        let mut buffer = vec![0u8; rawinfo.modellen as usize];
-        let s = file.read(&mut buffer).ok()?;
-        if s != buffer.len() {
-            return None;
-        }
+        let buffer = read_at(&mut file, file_len, rawinfo.modeloffset as u64, rawinfo.modellen as u64)?;
         rawinfo.model = str::from_utf8(&buffer).ok()?.to_owned();
     }
 
@@ -400,13 +356,7 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
         if rawinfo.blackcount == 4 {
             let mut blacks = [0f32; 4];
             if rawinfo.blacktype == 5 {
-                let mut buffer = vec![0u8; rawinfo.blackcount as usize * 2 * 4];
-                file.seek(SeekFrom::Start(rawinfo.blackoffset as u64))
-                    .ok()?;
-                let s = file.read(&mut buffer).ok()?;
-                if s != buffer.len() {
-                    return None;
-                }
+                let buffer = read_at(&mut file, file_len, rawinfo.blackoffset as u64, rawinfo.blackcount as u64 * 2 * 4)?;
                 for count in 0..rawinfo.blackcount as usize {
                     let numerator = i32e(&buffer[count * 2 * 4..(count * 2 + 1) * 4], rawinfo.bigendian);
                     let denominator = i32e(&buffer[(count * 2 + 1) * 4..(count * 2 + 2) * 4], rawinfo.bigendian);
@@ -429,52 +379,48 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
     }
 
     if rawinfo.bitsoffset != 0 {
-        file.seek(SeekFrom::Start(rawinfo.bitsoffset as u64)).ok()?;
-        let mut b = [0u8; 4];
-        let s = file.read(&mut b).ok()?;
-        if s != 4 {
-            return None;
-        }
+        let b = read_at(&mut file, file_len, rawinfo.bitsoffset as u64, 4)?;
         rawinfo.bitdepthold = match rawinfo.bitstype { 1 => b[0], 3 => u16e(&b, be) as u8, _ => u32e(&b, be) as u8 };
     }
 
     if rawinfo.cfaoffset != 0 {
-        file.seek(SeekFrom::Start(rawinfo.cfaoffset as u64)).ok()?;
-        let mut buffer = vec![0u8; rawinfo.cfacount as usize];
-        let s = file.read(&mut buffer).ok()?;
-        if s != buffer.len() {
-            return None;
-        }
-        rawinfo.cfa = buffer;
+        rawinfo.cfa = read_at(&mut file, file_len, rawinfo.cfaoffset as u64, rawinfo.cfacount as u64)?;
     }
 
     if rawinfo.colourmatrix1_offset != 0 {
-        rawinfo.colourmatrix1 = read_rational_matrix9(&mut file, rawinfo.colourmatrix1_offset, be);
+        rawinfo.colourmatrix1 = read_rational_matrix9(&mut file, file_len, rawinfo.colourmatrix1_offset, be);
     }
     if rawinfo.colourmatrix2_offset != 0 {
-        rawinfo.colourmatrix2 = read_rational_matrix9(&mut file, rawinfo.colourmatrix2_offset, be);
+        rawinfo.colourmatrix2 = read_rational_matrix9(&mut file, file_len, rawinfo.colourmatrix2_offset, be);
     }
     if rawinfo.cameracalibration1_offset != 0 {
-        rawinfo.cameracalibration1 = read_rational_matrix9(&mut file, rawinfo.cameracalibration1_offset, be);
+        rawinfo.cameracalibration1 = read_rational_matrix9(&mut file, file_len, rawinfo.cameracalibration1_offset, be);
     }
     if rawinfo.cameracalibration2_offset != 0 {
-        rawinfo.cameracalibration2 = read_rational_matrix9(&mut file, rawinfo.cameracalibration2_offset, be);
+        rawinfo.cameracalibration2 = read_rational_matrix9(&mut file, file_len, rawinfo.cameracalibration2_offset, be);
     }
     if rawinfo.sigcount > 0 {
         let bytes = if rawinfo.sigcount <= 4 {
             rawinfo.siginline[..rawinfo.sigcount as usize].to_vec()
         } else {
-            let mut b = vec![0u8; rawinfo.sigcount as usize];
-            if file.seek(SeekFrom::Start(rawinfo.sigoffset as u64)).is_ok() && file.read_exact(&mut b).is_ok() { b } else { Vec::new() }
+            read_at(&mut file, file_len, rawinfo.sigoffset as u64, rawinfo.sigcount as u64).unwrap_or_default()
         };
         rawinfo.calibration_signature = String::from_utf8_lossy(&bytes).trim_end_matches('\0').trim().to_string();
     }
 
+    // WHY/PROOF: the depth is a file byte and the samples are u16, so `1 << depth` panics past 31 and the unpack window's `32 - depth - intra` underflows past 24; only 1..=16 is a depth this reader can hold.
+    if rawinfo.bitdepthold == 0 || rawinfo.bitdepthold > 16 {
+        return None;
+    }
     rawinfo.white = rawinfo
         .white
-        .min((2usize.pow(rawinfo.bitdepthold as u32) - 1) as f32);
+        .min(((1u32 << rawinfo.bitdepthold) - 1) as f32);
 
-    if rawinfo.width == 0 || rawinfo.height == 0 || rawinfo.bitdepthold == 0 {
+    if rawinfo.width == 0 || rawinfo.height == 0 {
+        return None;
+    }
+    // WHY/PROOF: width and height are 32-bit file fields, so their product overflows usize on a 32-bit target and names terabytes on a 64-bit one; past the budget the frame is refused before any buffer is sized from it.
+    if rawinfo.width.checked_mul(rawinfo.height).is_none_or(|n| n > PIXEL_BUDGET) {
         return None;
     }
 
@@ -484,15 +430,11 @@ pub fn read_metadata(filename: &Path) -> Option<RawInfo> {
 
 fn read_strip_pixels(filename: &Path, info: &RawInfo) -> Option<Vec<u16>> {
     let mut file = File::open(filename).ok()?;
+    let file_len = file.metadata().ok()?.len();
     let samples = if info.rgb { 3 } else { info.samples.max(1) as usize };
-    let bytes_len = (info.width * info.height * samples * info.bitdepthold as usize - 1) / 8 + 1;
-    let mut img = vec![0u8; bytes_len];
-    file.seek(SeekFrom::Start(info.imagedataoffset as u64))
-        .ok()?;
-    let s = file.read(&mut img).ok()?;
-    if s != img.len() {
-        return None;
-    }
+    // width × height is within PIXEL_BUDGET and the depth within 16 (read_metadata refused the file otherwise), samples is 16-bit, so the product sits far below u64; the strip itself is then sized against the file by read_at.
+    let bits = info.width as u64 * info.height as u64 * samples as u64 * info.bitdepthold as u64;
+    let img = read_at(&mut file, file_len, info.imagedataoffset as u64, bits.div_ceil(8))?;
     Some(convert_raw_to_u16(&img, info.bitdepthold, info.bigendian))
 }
 
@@ -660,7 +602,8 @@ fn decode_ifd(
                 }
             }
             271 => {
-                if fieldtype == 2 && rawinfo.makeoffset == 0 {
+                // WHY/PROOF: the count is a file field, and `numval - 1` on a zero count wraps to a 4 GiB string length (and panics in a debug build).
+                if fieldtype == 2 && numval > 0 && rawinfo.makeoffset == 0 {
                     rawinfo.makelen = numval - 1;
                     if numval > 4 {
                         rawinfo.makeoffset = u32e(&valueoffset, be);
@@ -671,7 +614,8 @@ fn decode_ifd(
                 }
             }
             272 => {
-                if fieldtype == 2 && rawinfo.modeloffset == 0 {
+                // WHY/PROOF: same as Make — a zero count must not become a 4 GiB model length.
+                if fieldtype == 2 && numval > 0 && rawinfo.modeloffset == 0 {
                     rawinfo.modellen = numval - 1;
                     if numval > 4 {
                         rawinfo.modeloffset = u32e(&valueoffset, be);
@@ -797,7 +741,7 @@ fn decode_ifd(
     (rawinfo, subifdoffset, imgoffset, mainifd, trees)
 }
 
-/// Unpack the strip bitstream to u16 samples. 16-bit samples follow the file's byte order; everything below is MSB-first per TIFF FillOrder 1 (default) in either order, extracted through a 4-byte big-endian window — intra-byte offset ≤ 7 plus ≤ 15 bits stays under 32, so it's one shift + one mask per sample at ANY depth (10/12/14 and every intermediary alike, no per-depth cases). The window straddles the tail only for the last ≤ 3 samples, which take the zero-padded slow assembly. Every sample's bit offset is computable from its index alone, so the pass splits across the rayon pool (already in the tree via rawler).
+/// Unpack the strip bitstream to u16 samples. `bitdepth` is 1..=16 by the gate in [`read_metadata`], which is what keeps the shift and the window arithmetic below in range. 16-bit samples follow the file's byte order; everything below is MSB-first per TIFF FillOrder 1 (default) in either order, extracted through a 4-byte big-endian window — intra-byte offset ≤ 7 plus ≤ 15 bits stays under 32, so it's one shift + one mask per sample at ANY depth (10/12/14 and every intermediary alike, no per-depth cases). The window straddles the tail only for the last ≤ 3 samples, which take the zero-padded slow assembly. Every sample's bit offset is computable from its index alone, so the pass splits across the rayon pool (already in the tree via rawler).
 fn convert_raw_to_u16(raw_bytes: &[u8], bitdepth: u8, be: bool) -> Vec<u16> {
     use rayon::prelude::*;
     if bitdepth == 16 {
@@ -902,6 +846,74 @@ mod tests {
         let out = read_dng(&path).expect("synthetic file should decode");
         std::fs::remove_file(&path).ok();
         out
+    }
+
+    /// A single-IFD little-endian file from the given entries, followed by `tail` bytes, for crafting hostile headers.
+    fn crafted(entries_in: &[(u16, u16, u32, [u8; 4])], tail: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&[73, 73, 42, 0]);
+        f.extend_from_slice(&p32(8, false));
+        f.extend_from_slice(&p16(entries_in.len() as u16, false));
+        for &(tag, typ, count, val4) in entries_in {
+            entry(&mut f, tag, typ, count, val4, false);
+        }
+        f.extend_from_slice(&p32(0, false));
+        f.extend_from_slice(tail);
+        f
+    }
+
+    fn read_crafted(name: &str, bytes: &[u8]) -> Option<(RawInfo, Vec<u16>)> {
+        let path = std::env::temp_dir().join(name);
+        File::create(&path).unwrap().write_all(bytes).unwrap();
+        let out = read_dng(&path);
+        std::fs::remove_file(&path).ok();
+        out
+    }
+
+    /// Security audit LIB-12: counts, offsets and dimensions are file fields; none of them may size an allocation the file cannot fill, and a frame past the pixel budget is refused, not reserved.
+    #[test]
+    fn hostile_counts_and_dimensions_are_refused_without_allocating() {
+        let le = false;
+        let base = |w: [u8; 4], h: [u8; 4], bits: u16| {
+            vec![
+                (254u16, 4u16, 1u32, p32(0, le)),
+                (256, 4, 1, w),
+                (257, 4, 1, h),
+                (258, 3, 1, short4(bits, le)),
+                (259, 3, 1, short4(1, le)),
+                (273, 4, 1, p32(8 + 2 + 7 * 12 + 4, le)),
+                (50706, 1, 4, [1, 4, 0, 0]),
+            ]
+        };
+        let px = [100u16, 200, 300, 400].iter().flat_map(|v| p16(*v, le)).collect::<Vec<u8>>();
+        // The builder itself decodes: a 2×2 16-bit frame.
+        let sane = base(p32(2, le), p32(2, le), 16);
+        assert_eq!(read_crafted("limbus_lib12_sane.tif", &crafted(&sane, &px)).map(|(_, p)| p), Some(vec![100, 200, 300, 400]));
+        // A SubIFD list claiming 2^32 - 1 trees (16 GiB of offsets) the file does not hold.
+        let mut huge_trees = sane.clone();
+        huge_trees.push((330, 4, u32::MAX, p32(8, le)));
+        assert!(read_crafted("limbus_lib12_trees.tif", &crafted(&huge_trees, &px)).is_none());
+        // A Make string of 2^32 - 1 bytes, and one of zero bytes (whose `count - 1` once wrapped).
+        let mut huge_make = sane.clone();
+        huge_make.push((271, 2, u32::MAX, p32(8, le)));
+        assert!(read_crafted("limbus_lib12_make.tif", &crafted(&huge_make, &px)).is_none());
+        let mut zero_make = sane.clone();
+        zero_make.push((271, 2, 0, p32(0, le)));
+        assert!(read_crafted("limbus_lib12_make0.tif", &crafted(&zero_make, &px)).is_some());
+        // A CFA pattern of 2^32 - 1 entries.
+        let mut huge_cfa = sane.clone();
+        huge_cfa.push((33422, 1, u32::MAX, p32(8, le)));
+        assert!(read_crafted("limbus_lib12_cfa.tif", &crafted(&huge_cfa, &px)).is_none());
+        // Dimensions whose product overflows, and a frame just past the budget.
+        let overflow = base(p32(u32::MAX, le), p32(u32::MAX, le), 16);
+        assert!(read_crafted("limbus_lib12_overflow.tif", &crafted(&overflow, &px)).is_none());
+        let past_budget = base(p32(1 << 15, le), p32((1 << 14) + 1, le), 16);
+        assert!(read_crafted("limbus_lib12_budget.tif", &crafted(&past_budget, &px)).is_none());
+        // A depth of 200 bits, which no u16 sample holds and which would shift past the window.
+        let deep = base(p32(2, le), p32(2, le), 200);
+        assert!(read_crafted("limbus_lib12_depth.tif", &crafted(&deep, &px)).is_none());
+        // A sane header over a strip the file cuts short.
+        assert!(read_crafted("limbus_lib12_short.tif", &crafted(&sane, &px[..6])).is_none());
     }
 
     #[test]
